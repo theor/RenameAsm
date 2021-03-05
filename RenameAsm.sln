@@ -1,0 +1,16 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RenameAsm", "RenameAsm.csproj", "{3FE607C3-8852-4A6F-85B0-42C02FD83180}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{3FE607C3-8852-4A6F-85B0-42C02FD83180}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3FE607C3-8852-4A6F-85B0-42C02FD83180}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3FE607C3-8852-4A6F-85B0-42C02FD83180}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3FE607C3-8852-4A6F-85B0-42C02FD83180}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal
