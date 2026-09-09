@@ -2,16 +2,18 @@
 
     <PropertyGroup>
         <OutputType>Exe</OutputType>
-        <TargetFramework>net5.0</TargetFramework>
+        <TargetFramework>net10.0</TargetFramework>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <!-- Build for the host RID so the native ilasm/ildasm from the runtime packs land next to the app. -->
+        <RuntimeIdentifier>$(NETCoreSdkRuntimeIdentifier)</RuntimeIdentifier>
+        <SelfContained>false</SelfContained>
+        <RollForward>Major</RollForward>
     </PropertyGroup>
 
     <ItemGroup>
-      <None Update="ilasm.exe">
-        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      </None>
-      <None Update="ildasm.exe">
-        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      </None>
+        <PackageReference Include="Microsoft.NETCore.ILAsm" Version="10.0.12" />
+        <PackageReference Include="Microsoft.NETCore.ILDAsm" Version="10.0.12" />
     </ItemGroup>
 
 </Project>
