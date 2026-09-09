@@ -11,8 +11,13 @@ static class Program
 {
     const string Usage = """
         Usage:
-          RenameAsm <assembly> <newname> [--out <dir>] [--also <old>=<new>]...
-          RenameAsm --prefix <prefix> <assembly>... [--out <dir>] [--also <old>=<new>]...
+          RenameAsm <assembly> <newname> [options]
+          RenameAsm --prefix <prefix> <assembly>... [options]
+
+        Options:
+          --out <dir>          output directory (default: current directory)
+          --also <old>=<new>   rename an extra name; may be repeated
+          --strip-key          remove the strong-name public key
 
         Each input assembly is disassembled, every occurrence of its name is replaced
         (assembly, module, namespaces, string literals, references from the other inputs),
@@ -20,6 +25,10 @@ static class Program
 
         --also renames an extra name, typically a namespace that does not start with the
         assembly name. The tool warns about public namespaces the rename leaves untouched.
+
+        --strip-key drops the public key from each input, the public key token from references
+        between the inputs, and the PublicKey= part of InternalsVisibleTo entries, so the
+        outputs are plain unsigned assemblies instead of signed-looking ones with no signature.
         """;
 
     static int Main(string[] args)
@@ -44,13 +53,14 @@ static class Program
     }
 }
 
-sealed record Options(IReadOnlyList<string> Inputs, Func<string, string> NewName, string OutDir, IReadOnlyDictionary<string, string> Also)
+sealed record Options(IReadOnlyList<string> Inputs, Func<string, string> NewName, string OutDir, IReadOnlyDictionary<string, string> Also, bool StripKey)
 {
     public static Options? Parse(string[] args)
     {
         string? prefix = null, outDir = null;
         var positional = new List<string>();
         var also = new Dictionary<string, string>();
+        var stripKey = false;
         for (int i = 0; i < args.Length; i++)
         {
             switch (args[i])
@@ -59,6 +69,7 @@ sealed record Options(IReadOnlyList<string> Inputs, Func<string, string> NewName
                 case "--out" when i + 1 < args.Length: outDir = args[++i]; break;
                 case "--also" when i + 1 < args.Length && args[i + 1].Split('=') is [var old, var @new] && old != "" && @new != "":
                     also[old] = @new; i++; break;
+                case "--strip-key": stripKey = true; break;
                 case "-h" or "--help": return null;
                 default: positional.Add(args[i]); break;
             }
@@ -66,9 +77,9 @@ sealed record Options(IReadOnlyList<string> Inputs, Func<string, string> NewName
         outDir = Path.GetFullPath(outDir ?? Directory.GetCurrentDirectory());
 
         if (prefix is not null)
-            return positional.Count == 0 ? null : new Options(positional, old => prefix + old, outDir, also);
+            return positional.Count == 0 ? null : new Options(positional, old => prefix + old, outDir, also, stripKey);
         if (positional.Count == 2)
-            return new Options([positional[0]], _ => positional[1], outDir, also);
+            return new Options([positional[0]], _ => positional[1], outDir, also, stripKey);
         return null;
     }
 }
@@ -89,16 +100,19 @@ sealed class Renamer(Options options)
         WarnAboutUncoveredNamespaces(jobs, replacer);
         Directory.CreateDirectory(options.OutDir);
 
+        var outputNames = jobs.Select(j => renames[j.OldName]).ToHashSet();
+        var keyStripper = options.StripKey ? new KeyStripper(outputNames) : null;
+
         foreach (var job in jobs)
         {
             var output = Path.Combine(options.OutDir, renames[job.OldName] + job.Extension);
             Console.WriteLine($"{job.Input} -> {output}");
-            Process(job, replacer, output);
-            Verify(output, renames[job.OldName], renames);
+            Process(job, replacer, keyStripper, output);
+            Verify(output, renames[job.OldName], renames, keyStripper is not null);
         }
     }
 
-    void Process(Job job, NameReplacer replacer, string output)
+    void Process(Job job, NameReplacer replacer, KeyStripper? keyStripper, string output)
     {
         var work = Directory.CreateTempSubdirectory("RenameAsm-").FullName;
         try
@@ -109,7 +123,9 @@ sealed class Renamer(Options options)
             Exec(_ildasm, ["-UTF8", "-CAVERBAL", $"-OUT={preIl}", job.Input]);
             if (!File.Exists(preIl)) throw new RenameException($"ildasm produced no output for {job.Input}");
 
-            File.WriteAllText(postIl, replacer.Apply(File.ReadAllText(preIl)));
+            var il = replacer.Apply(File.ReadAllText(preIl));
+            if (keyStripper is not null) il = keyStripper.Strip(il);
+            File.WriteAllText(postIl, il);
 
             // ildasm extracts embedded resources next to the .il; ilasm looks them up by their new names.
             foreach (var resource in Directory.GetFiles(work).Where(f => f != preIl && f != postIl))
@@ -141,20 +157,30 @@ sealed class Renamer(Options options)
     }
 
     /// <summary>Reads the result back and checks the rename took, including references to the other inputs.</summary>
-    static void Verify(string output, string expectedName, IReadOnlyDictionary<string, string> renames)
+    static void Verify(string output, string expectedName, IReadOnlyDictionary<string, string> renames, bool keyStripped)
     {
         using var pe = new PEReader(File.OpenRead(output));
         var md = pe.GetMetadataReader();
-        var name = md.GetString(md.GetAssemblyDefinition().Name);
+        var definition = md.GetAssemblyDefinition();
+        var name = md.GetString(definition.Name);
         if (name != expectedName)
             throw new RenameException($"{output}: assembly name is '{name}', expected '{expectedName}'");
 
-        var stale = md.AssemblyReferences
-            .Select(h => md.GetString(md.GetAssemblyReference(h).Name))
-            .Where(renames.ContainsKey)
-            .ToList();
+        var references = md.AssemblyReferences.Select(md.GetAssemblyReference).ToList();
+        var stale = references.Select(r => md.GetString(r.Name)).Where(renames.ContainsKey).ToList();
         if (stale.Count > 0)
             throw new RenameException($"{output}: still references un-renamed assemblies: {string.Join(", ", stale)}");
+
+        if (!keyStripped) return;
+        if (!definition.PublicKey.IsNil)
+            throw new RenameException($"{output}: still carries a public key");
+        if (pe.PEHeaders.CorHeader is { Flags: var flags } && flags.HasFlag(CorFlags.StrongNameSigned))
+            throw new RenameException($"{output}: CLR header still has the StrongNameSigned flag");
+        var signedReferences = references
+            .Where(r => renames.Values.Contains(md.GetString(r.Name)) && !r.PublicKeyOrToken.IsNil)
+            .Select(r => md.GetString(r.Name)).ToList();
+        if (signedReferences.Count > 0)
+            throw new RenameException($"{output}: still references by public key token: {string.Join(", ", signedReferences)}");
     }
 
     static void Exec(string exe, string[] args)
@@ -216,6 +242,64 @@ sealed record Job(string Input, string OldName, string Extension, bool IsExe, IR
 
         var extension = Path.GetExtension(input);
         return new Job(input, assemblyName, extension, extension.Equals(".exe", StringComparison.OrdinalIgnoreCase), publicTypes);
+    }
+}
+
+/// <summary>Turns signed inputs into plain unsigned assemblies at the IL level: drops the
+/// .publickey of the definition, the .publickeytoken of references to the other outputs, and the
+/// PublicKey= part of InternalsVisibleTo entries (a friend without a key cannot match one).</summary>
+sealed class KeyStripper(IReadOnlySet<string> outputAssemblies)
+{
+    static readonly Regex IvtPublicKey = new(@",\s*PublicKey\s*=\s*[0-9A-Fa-f]+", RegexOptions.Compiled);
+    static readonly Regex CorFlags = new(@"^(\.corflags 0x)([0-9A-Fa-f]{8})", RegexOptions.Compiled);
+    const int StrongNameSignedFlag = 0x8;
+
+    public string Strip(string il)
+    {
+        var lines = il.Split('\n');
+        var kept = new List<string>(lines.Length);
+        string? block = null; // "" inside the .assembly definition, the name inside an .assembly extern, else null
+
+        for (int i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i];
+            var trimmed = line.TrimStart();
+
+            if (trimmed.StartsWith(".assembly extern ")) block = FirstIdentifier(trimmed[".assembly extern ".Length..]);
+            else if (trimmed.StartsWith(".assembly ")) block = "";
+            else if (line.StartsWith('}')) block = null;
+
+            var dropDefinitionKey = block == "" && trimmed.StartsWith(".publickey = (");
+            var dropReferenceToken = block is { Length: > 0 } && outputAssemblies.Contains(block) && trimmed.StartsWith(".publickeytoken = (");
+            if (dropDefinitionKey || dropReferenceToken)
+            {
+                // The byte blob spans lines; each ends with a "// ascii" comment that may itself contain ')'.
+                while (!ClosesBlob(lines[i])) i++;
+                continue;
+            }
+
+            // InternalsVisibleTo("Friend, PublicKey=...") entries live in the definition block; the
+            // verbal string sits on the line after the .custom header, so scan the whole block.
+            if (block == "") line = IvtPublicKey.Replace(line, "");
+            // The CLR header must not claim a signature that is no longer there.
+            if (line.StartsWith(".corflags 0x"))
+                line = CorFlags.Replace(line, m => m.Groups[1].Value + (Convert.ToInt32(m.Groups[2].Value, 16) & ~StrongNameSignedFlag).ToString("X8"));
+            kept.Add(line);
+        }
+        return string.Join('\n', kept);
+    }
+
+    static bool ClosesBlob(string line)
+    {
+        var comment = line.IndexOf("//", StringComparison.Ordinal);
+        return (comment < 0 ? line : line[..comment]).Contains(')');
+    }
+
+    static string FirstIdentifier(string text)
+    {
+        var end = text.IndexOfAny([' ', '\t', '\r', '\n']);
+        var name = end < 0 ? text : text[..end];
+        return name.Trim('\'');
     }
 }
 

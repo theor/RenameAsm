@@ -4,8 +4,12 @@ Renames .NET assemblies: file name, assembly name, module name and namespaces.
 Give it several assemblies at once and the references between them are rewritten too.
 
 ```
-RenameAsm <assembly> <newname> [--out <dir>] [--also <old>=<new>]...
-RenameAsm --prefix <prefix> <assembly>... [--out <dir>] [--also <old>=<new>]...
+RenameAsm <assembly> <newname> [options]
+RenameAsm --prefix <prefix> <assembly>... [options]
+
+  --out <dir>          output directory (default: current directory)
+  --also <old>=<new>   rename an extra namespace or type; may be repeated
+  --strip-key          remove the strong-name public key (see below)
 ```
 
 Examples:
@@ -60,10 +64,18 @@ the prefix, `System.Reflection.Metadata` becomes `Unity.System.Reflection.Metada
 namespace, because C# looks names up outward through the enclosing namespaces before the global
 one. A single-segment prefix such as `UnityPipeline.` avoids this.
 
+## Strong names
+
+The signature cannot survive the rename, so by default the output keeps its public key but has no
+valid signature. Mono, Unity and .NET Core do not verify signatures, so this usually works.
+
+`--strip-key` makes the outputs plain unsigned assemblies instead. It removes the public key from
+each input, the public key token from references between the inputs, the `PublicKey=` part of
+every `InternalsVisibleTo` entry (a friend without a key can no longer match one), and the
+StrongNameSigned bit in the CLR header. The read-back check fails if any of these remain.
+
 ## Limitations
 
-- Strong-name signatures are dropped. The public key stays, so the output looks
-  delay-signed. Mono and Unity do not verify signatures; .NET Core does not either.
 - Win32 resources (file version info) are lost. The .NET ildasm/ilasm cannot round-trip them.
 - A short assembly name such as `A` will also match single-letter identifiers and string
   literals. Check the output.
