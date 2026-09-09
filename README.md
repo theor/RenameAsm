@@ -1,21 +1,69 @@
 # RenameAsm
 
-Renames a .net assembly/module/namespaces:
-- Will change the file name, but also the actual .net assembly name and the matching module name
-- Will also rename all namespaces
+Renames .NET assemblies: file name, assembly name, module name and namespaces.
+Give it several assemblies at once and the references between them are rewritten too.
 
-Usage: `RenameAsm.exe <dll to rename> <new name>`
+```
+RenameAsm <assembly> <newname> [--out <dir>] [--also <old>=<new>]...
+RenameAsm --prefix <prefix> <assembly>... [--out <dir>] [--also <old>=<new>]...
+```
 
-Example: `RenameAsm C:\my.dll newname` will output `newname.dll`
+Examples:
 
-That requires the dll name and its namespaces to match in the first place: if you have a dll/assembly named `AB` but its namespace is `A.B`, it won't match. in that case, either call the tool twice (rename AB to A.B first, then A.B to C.D) or just add a `.Replace("AB", "A.B")` line in Program.cs.
+```
+RenameAsm my.dll newname                       # writes ./newname.dll
+RenameAsm --prefix UnityPipeline. --out out/ Plugins/CodeAnalysis/*.dll
+# writes out/UnityPipeline.Microsoft.CodeAnalysis.dll, out/UnityPipeline.Microsoft.CodeAnalysis.CSharp.dll, ...
+# and UnityPipeline.Microsoft.CodeAnalysis.CSharp now references UnityPipeline.Microsoft.CodeAnalysis
+```
+
+Runs on macOS, Linux and Windows. Needs the .NET 10 SDK; `dotnet build` pulls the
+matching `ilasm`/`ildasm` from NuGet for the host platform.
 
 ## How it works
 
-- `ildasm /output:pre.il my.dll` disassembles the dll and write the il to a pre.il file
-- text replace `my` with `newname` and write that to `post.il`
-- `ilasm /dll /out:newname.dll post.il`
+For each input assembly:
 
-## Embedded resources
+1. `ildasm` disassembles it to a temp directory. Custom attributes are emitted in verbal
+   form so strings inside them (`AssemblyTitle`, `InternalsVisibleTo`, ...) get renamed too.
+2. Every old name is replaced with its new name. The match is bounded, so `Foo` is renamed
+   in `Foo.Bar` and `[Foo]Foo.Baz` but not in `MyFoo` or `Foo2`. All inputs are renamed in
+   one pass, longest name first, so `Microsoft.CodeAnalysis.CSharp` and
+   `Microsoft.CodeAnalysis` do not step on each other.
+3. Embedded resources extracted by `ildasm` are renamed on disk to match.
+4. `ilasm` reassembles into the output directory.
+5. The result is read back: the assembly name must be the new one, and no reference to
+   another input may still use an old name.
 
-if reassembling fails because embedded resources cannot be found: the disassembling has extracted those resources to the disk (eg. `my.someresource.resource`). rename these files by hand (`newname.someresource.resource`), then re-run the tool
+Any step failing makes the tool exit non-zero and keeps the temp directory for inspection.
+
+Only names that start with the assembly name are renamed. A public type in another namespace
+(`System.Reflection.PortableExecutable.PEReader` in `System.Reflection.Metadata.dll`, say) keeps
+its full name, and collides with the original if both get loaded. The tool warns about every
+such type. Add `--also <namespace>=<new>` or `--also <full type name>=<new>` to rename them too:
+
+```
+RenameAsm --prefix UnityPipeline. System.Reflection.Metadata.dll \
+  --also System.Reflection.PortableExecutable=UnityPipeline.System.Reflection.PortableExecutable \
+  --also System.Reflection.AssemblyFlags=UnityPipeline.System.Reflection.AssemblyFlags
+```
+
+The rename uses the assembly name from metadata, not the file name. If the two differ the
+tool warns. Namespaces are only renamed where they start with the assembly name, so an
+assembly `AB` with namespace `A.B` needs two runs (`AB` to `A.B`, then `A.B` to `C.D`).
+
+## Picking a prefix
+
+Pick a prefix whose first segment is not a namespace your own code lives in. With `Unity.` as
+the prefix, `System.Reflection.Metadata` becomes `Unity.System.Reflection.Metadata`, and any
+`System.Type` written inside `namespace Unity.Pipeline` then resolves to the new `Unity.System`
+namespace, because C# looks names up outward through the enclosing namespaces before the global
+one. A single-segment prefix such as `UnityPipeline.` avoids this.
+
+## Limitations
+
+- Strong-name signatures are dropped. The public key stays, so the output looks
+  delay-signed. Mono and Unity do not verify signatures; .NET Core does not either.
+- Win32 resources (file version info) are lost. The .NET ildasm/ilasm cannot round-trip them.
+- A short assembly name such as `A` will also match single-letter identifiers and string
+  literals. Check the output.
